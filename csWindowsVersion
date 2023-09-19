@@ -1,0 +1,131 @@
+<#  .Description
+		
+		Title: CrowdStrike Windows Server Assets Report Generator
+		Created: 2023-09-18
+		Author: Samir Budhdeo
+		Version 1.2
+
+		This PowerShell script is designed to generate a comprehensive report of Windows Server assets
+		managed by CrowdStrike Falcon. The report provides essential information, including hostname, 
+		last seen date, first seen date, OS version, local IP, system manufacturer, and agent version
+		version for each Windows Server.
+		
+		Features:
+
+		Module Dependency Check: The script begins by checking for the presence of required PowerShell 
+		modules, PSFalcon and PSWriteHTML. If any of these modules are missing, the script offers to 
+		install them automatically.
+
+		Authentication: It securely obtains an access token from CrowdStrike by providing API credentials
+		(Client ID and Client Secret) and handles the authorization required for API requests.
+
+		Data Retrieval: The script makes API requests to CrowdStrike to retrieve host data based on defined 
+		filter criteria, specifically targeting Windows Server assets.
+
+		Data Transformation: It processes the retrieved data, including formatting date columns (last seen 
+		and first seen) to 'yyyy-MM-dd' format, making it more human-readable.
+
+		CSV Export: The script exports the processed Windows Server asset data to a CSV file, allowing for
+		easy data analysis and further processing.
+
+		Dynamic HTML Report: It generates a dynamic HTML report from the CSV data, providing a user-friendly, 
+		web-based representation of Windows Server asset information. The HTML report is suitable for sharing 
+		with stakeholders and management.
+
+		Prerequisites:
+
+			PowerShell modules PSFalcon and PSWriteHTML must be installed. The script offers to install them 
+			if they are missing.
+			API credentials (Client ID and Client Secret) for CrowdStrike Falcon.
+			A valid configuration file (CrowdStrikeConfig.json) containing additional configuration details.
+
+		Usage:
+
+			Ensure that the required modules are installed.
+			Update the API credentials in the script ($ClientId and $ClientSecret).
+			Customize the filter criteria to target specific Windows Server assets or attributes.
+			Execute the script to generate the report.
+
+#>
+
+# Define all required modules
+$modules = 'PSFalcon', 'PSWriteHTML'
+$installed = @((Get-Module $modules -ListAvailable).Name | Select-Object -Unique)
+
+# Infer which ones *aren't* installed.
+$notInstalled = Compare-Object $modules $installed -PassThru
+if ($notInstalled) { # At least one module is missing.
+  $promptText = @"
+  The following modules aren't currently installed:
+        $notInstalled
+  Would you like to install them now?
+"@
+  $choice = $host.UI.PromptForChoice('Missing modules', $promptText, ('&Yes', '&No'), 0)
+ if ($choice -ne 0) { Write-Warning 'Aborted.'; exit 1 }
+  # Install the missing modules now.
+  Install-Module -Scope CurrentUser $notInstalled
+}
+
+# Define your API credentials
+$ClientId = ""
+$ClientSecret = ""
+$OAuthTokenUrl = "https://api.crowdstrike.com/oauth2/token"
+
+$ReportName = "csWindowsServerAssets"
+$HTMLReportTitle = "CrowdStrike Servers (Windows Assets)"
+$Date = Get-Date -format yyyyMMdd
+$scriptRoot = "C:\Scripts\Crowdstrike\"
+$htmlFile = $scriptRoot + $ReportName + "_" + $Date + ".html"
+$csvFile = $scriptRoot + $ReportName + "_" + $Date + ".csv" # Define the CSV file path
+
+# Define the body of the request to obtain the access token
+$body = @{
+    "client_id"     = $ClientId
+    "client_secret" = $ClientSecret
+    "scope"         = "oauth2:write"
+    "grant_type"    = "client_credentials"
+}
+
+# Send the request to obtain the access token
+$response = Invoke-RestMethod -Uri $OAuthTokenUrl -Method POST -Body $body
+
+# Extract the access token from the response
+$accessToken = $response.access_token
+
+# Set the Authorization header with the access token
+$headers = @{
+    "Authorization" = "Bearer $accessToken"
+}
+
+# Load the configuration from the JSON file
+$configuration = Get-Content -Raw -Path "CrowdStrikeConfig.json" | ConvertFrom-Json
+
+# Get the access token
+$token = Request-FalconToken -ClientId $configuration.ClientId -ClientSecret $configuration.ClientSecret
+
+# Define the filter criteria
+$Filter = "platform_name:'Windows'+product_type_desc:'Server'"
+
+# Fetch FalconHost data
+$HostData = Get-FalconHost -Filter $Filter -Detailed -All
+
+$HostProperties = $HostData | ForEach-Object {
+    $_.last_seen = [datetime]::Parse($_.last_seen).ToString('yyyy-MM-dd')
+    $_.first_seen = [datetime]::Parse($_.first_seen).ToString('yyyy-MM-dd')
+    $_
+} | Select-Object hostname, last_seen, first_seen, os_version, local_ip, system_manufacturer, agent_version
+
+# Export the data to a CSV file
+$HostProperties | Export-Csv -Path $csvFile -NoTypeInformation
+
+#---------------------------------------------------------------------------------
+# Build Dynamic HTML from the CSV date
+#---------------------------------------------------------------------------------
+$MyDynTable = Import-CSV $csvFile
+$MyDynTable | Out-HtmlView -FilePath $htmlFile -PreventShowHTML
+
+# Display a message indicating the CSV file path
+Write-Host "CSV report saved to: $csvFile"
+
+# Display a message indicating the HTML file path
+Write-Host "HTML report saved to: $htmlFile"
